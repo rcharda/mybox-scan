@@ -9,10 +9,7 @@ name: 🤖 Scan Auto IPTV
 on:
   # ── Planification automatique ──────────────────────────
   schedule:
-    - cron: '0 6 * * *'    # Tous les jours à 6h00 UTC
-    # Autres exemples :
-    # - cron: '0 */12 * * *'  # Toutes les 12h
-    # - cron: '0 6 * * 1'     # Tous les lundis à 6h
+    - cron: '0 6 * * *'    # Se lance seul tous les jours à 6h00 UTC
 
   # ── Lancement manuel depuis GitHub.com ─────────────────
   workflow_dispatch:
@@ -26,7 +23,7 @@ jobs:
   scan:
     name: Scanner les chaînes IPTV
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # Arrêt forcé après 60 min
+    timeout-minutes: 60   # Arrêt forcé après 60 min pour rester dans le quota gratuit
 
     steps:
       # 1. Télécharger le code du dépôt
@@ -40,15 +37,13 @@ jobs:
           node-version: '20'
 
       # 3. Lancer le scan
-      #    Les secrets SUPABASE_URL et SUPABASE_KEY sont
-      #    configurés dans Settings → Secrets → Actions
       - name: 🤖 Lancer le scan
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: node scan.js
 
-      # 4. (Optionnel) Afficher un résumé dans l'interface GitHub
+      # 4. Résumé final
       - name: 📊 Résumé
         if: always()
         run: echo "✅ Scan terminé — voir les logs ci-dessus pour les détails"
