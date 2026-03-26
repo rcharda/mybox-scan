@@ -1,7 +1,6 @@
 // ════════════════════════════════════════════════════════
 //  SCAN AUTO — VERSION SERVEUR (GitHub Actions)
-//  Reproduit la logique de onglet_scan_auto.html
-//  sans navigateur, via des requêtes HTTP simples
+//  🚀 MODE TURBO SEUL (Sans filtre intelligent)
 // ════════════════════════════════════════════════════════
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -22,10 +21,10 @@ const SB_HEADERS_W = {
   'Prefer': 'return=representation',
 };
 
-// ── CONFIG ────────────────────────────────────────────
-const TIMEOUT_MS   = 10_000; // 10 secondes par chaîne
-const CONCURRENCY  = 10;     // 10 chaînes testées en parallèle
-const RETRY_COUNT  = 1;      // 1 retry si timeout
+// ── 🚀 CONFIGURATION TURBO ─────────────────────────────
+const TIMEOUT_MS   = 5_000;  // 5 secondes max par chaîne
+const CONCURRENCY  = 50;     // 50 chaînes testées en même temps
+const RETRY_COUNT  = 0;      // 0 retry pour aller au plus vite
 
 // ════════════════════════════════════════════════════════
 //  HELPERS
@@ -63,9 +62,7 @@ async function sbPost(table, body) {
 }
 
 // ════════════════════════════════════════════════════════
-//  TEST D'UNE CHAÎNE (équivalent de testChannel() du HTML)
-//  On fait un GET HTTP sur l'URL .m3u8 ou le stream.
-//  Si la réponse est 2xx ou 3xx → chaîne vivante.
+//  TEST D'UNE CHAÎNE
 // ════════════════════════════════════════════════════════
 async function testChannel(ch, attempt = 0) {
   const controller = new AbortController();
@@ -83,16 +80,12 @@ async function testChannel(ch, attempt = 0) {
     });
     clearTimeout(timer);
 
-    // 2xx ou 3xx = le flux répond
     if (res.status < 400) return true;
-
-    // 401/403 = protégé mais existe
     if (res.status === 401 || res.status === 403) return true;
 
     return false;
   } catch (err) {
     clearTimeout(timer);
-    // Retry une fois en cas de timeout réseau
     if (attempt < RETRY_COUNT) {
       await new Promise(r => setTimeout(r, 1000));
       return testChannel(ch, attempt + 1);
@@ -102,7 +95,7 @@ async function testChannel(ch, attempt = 0) {
 }
 
 // ════════════════════════════════════════════════════════
-//  SCAN EN PARALLÈLE (pool de CONCURRENCY)
+//  SCAN EN PARALLÈLE
 // ════════════════════════════════════════════════════════
 async function scanAllChannels(channels) {
   const okChannels   = [];
@@ -110,7 +103,6 @@ async function scanAllChannels(channels) {
   let done = 0;
   const total = channels.length;
 
-  // Découper en batches de CONCURRENCY
   for (let i = 0; i < total; i += CONCURRENCY) {
     const batch = channels.slice(i, i + CONCURRENCY);
 
@@ -122,24 +114,27 @@ async function scanAllChannels(channels) {
       done++;
       if (ok) {
         okChannels.push(ch);
-        log('ok', `[${done}/${total}] MARCHE  → ${ch.name || ch.url}`);
       } else {
         failChannels.push(ch);
-        log('fail', `[${done}/${total}] MORTE   → ${ch.name || ch.url}`);
       }
     }
 
     const pct = Math.round((done / total) * 100);
-    log('sys', `Progression : ${pct}% (${done}/${total}) — ✅ ${okChannels.length} | ❌ ${failChannels.length}`);
+    // Affichage condensé pour ne pas surcharger les logs de GitHub
+    if (i % (CONCURRENCY * 5) === 0 || done === total) {
+        log('sys', `Progression : ${pct}% (${done}/${total}) — ✅ ${okChannels.length} | ❌ ${failChannels.length}`);
+    }
   }
 
   return { okChannels, failChannels };
 }
 
 // ════════════════════════════════════════════════════════
-//  PUBLICATION SUR SUPABASE (identique au HTML)
+//  PUBLICATION SUR SUPABASE (CLASSIQUE)
 // ════════════════════════════════════════════════════════
 async function publishToSupabase(okChannels, failChannels, currentVersion) {
+  
+  // Rejoint simplement les chaînes qui marchent avec celles qui sont mortes
   const orderedChannels = [...okChannels, ...failChannels];
   const prioURLs = okChannels.map(c => c.url);
 
@@ -174,8 +169,8 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
   }
   log('ok', `✅ channels_data publié (v${newVersion})`);
 
-  // 2. Publier channel_priorities
-  log('sys', `⭐ Mise à jour channel_priorities (${prioURLs.length} URLs)...`);
+  // 2. Publier channel_priorities (Toutes les chaînes qui marchent)
+  log('sys', `⭐ Mise à jour channel_priorities (${prioURLs.length} URLs qui fonctionnent)...`);
   const r2 = await sbPatch('channel_priorities', 'id=eq.1', {
     priorities: prioURLs,
     saved_at: now.toISOString(),
@@ -188,7 +183,7 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
       saved_at: now.toISOString(),
     });
   }
-  log('ok', `✅ channel_priorities mis à jour (${prioURLs.length} prioritaires)`);
+  log('ok', `✅ channel_priorities mis à jour (${prioURLs.length} URLs)`);
 
   return newVersion;
 }
@@ -198,11 +193,10 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
 // ════════════════════════════════════════════════════════
 async function main() {
   log('sys', '══════════════════════════════════════════════');
-  log('sys', '🤖 SCAN AUTO — DÉMARRAGE (version serveur)');
+  log('sys', '🤖 SCAN AUTO — DÉMARRAGE (Mode Turbo Simple)');
   log('sys', `⏱  Timeout : ${TIMEOUT_MS / 1000}s | Concurrence : ${CONCURRENCY}`);
   log('sys', '══════════════════════════════════════════════');
 
-  // 1. Charger les chaînes depuis Supabase
   log('sys', '🔄 Chargement des chaînes depuis Supabase...');
   const rows = await sbGet(
     'channels_data',
@@ -218,7 +212,6 @@ async function main() {
   const currentVersion = rows[0].version || '1.0';
   log('ok', `${allChannels.length} chaînes chargées (v${currentVersion})`);
 
-  // 2. Scanner toutes les chaînes
   log('sys', '🤖 Démarrage du scan...');
   const startTime = Date.now();
   const { okChannels, failChannels } = await scanAllChannels(allChannels);
@@ -231,14 +224,11 @@ async function main() {
   log('sys', `📊 Taux de réussite     : ${Math.round(okChannels.length / allChannels.length * 100)}%`);
   log('sys', '══════════════════════════════════════════════');
 
-  // 3. Publier sur Supabase
   const newVersion = await publishToSupabase(okChannels, failChannels, currentVersion);
 
   log('sys', '');
   log('sys', `🚀 PUBLICATION RÉUSSIE — v${newVersion}`);
-  log('sys', `📦 ${allChannels.length} chaînes publiées`);
-  log('ok',  `⭐ ${okChannels.length} chaînes prioritaires en haut`);
-  log('fail',`🔻 ${failChannels.length} chaînes mortes en bas`);
+  log('sys', `📦 ${allChannels.length} chaînes traitées et publiées.`);
 }
 
 main().catch(err => {
