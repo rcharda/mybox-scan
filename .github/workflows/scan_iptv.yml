@@ -26,7 +26,7 @@ jobs:
   scan:
     name: Scanner les chaînes IPTV
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # Arrêt forcé après 60 min
+    timeout-minutes: 300   # Arrêt forcé après 60 min
 
     steps:
       # 1. Télécharger le code du dépôt
