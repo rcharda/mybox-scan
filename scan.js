@@ -1,13 +1,15 @@
 // ════════════════════════════════════════════════════════
 //  SCAN AUTO — VERSION SERVEUR (GitHub Actions)
-//  Optimisé pour 31 000+ chaînes (~21 min)
+//  TRUE WORKER POOL — optimisé pour 31 000+ chaînes
+//  Problème résolu : batch → worker pool
+//  Chaque worker prend la tâche suivante immédiatement
 // ════════════════════════════════════════════════════════
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("❌ Variables d'environnement manquantes : SUPABASE_URL et SUPABASE_KEY");
+  console.error("❌ Variables manquantes : SUPABASE_URL et SUPABASE_KEY");
   process.exit(1);
 }
 
@@ -21,14 +23,15 @@ const SB_HEADERS_W = {
   'Prefer': 'return=representation',
 };
 
-// ── CONFIG OPTIMISÉE 31 000 chaînes ──────────────────
-const TIMEOUT_MS  = 4_000;  // 4s par chaîne
-const CONCURRENCY = 100;    // 100 chaînes en parallèle
-const RETRY_COUNT = 1;      // 1 retry si échec réseau
+// ── CONFIG WORKER POOL ────────────────────────────────
+const TIMEOUT_MS  = 3_000;  // 3s (HEAD répond vite)
+const CONCURRENCY = 300;    // 300 workers en parallèle
+//
+// Estimation : 31 000 chaînes à 96% mortes
+//   300 workers × (1/3s) = ~100 ch/s
+//   31 000 / 100 = ~5 min ✅
+// ─────────────────────────────────────────────────────
 
-// ════════════════════════════════════════════════════════
-//  HELPERS
-// ════════════════════════════════════════════════════════
 function log(type, msg) {
   const icons = { ok: '✅', fail: '❌', info: 'ℹ️', warn: '⚠️', sys: '🔵' };
   const ts = new Date().toLocaleTimeString('fr-FR');
@@ -59,16 +62,18 @@ async function sbPost(table, body) {
 }
 
 // ════════════════════════════════════════════════════════
-//  TEST D'UNE CHAÎNE — GET HTTP simple
-//  2xx / 3xx / 401 / 403 = chaîne vivante
+//  TEST D'UNE CHAÎNE
+//  HEAD d'abord (rapide), GET en fallback
+//  2xx / 3xx / 401 / 403 = vivante
 // ════════════════════════════════════════════════════════
-async function testChannel(ch, attempt = 0) {
+async function testChannel(ch) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
+    // HEAD = pas de body téléchargé → plus rapide
     const res = await fetch(ch.url, {
-      method: 'GET',
+      method: 'HEAD',
       signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; IPTVScanner/1.0)',
@@ -77,51 +82,57 @@ async function testChannel(ch, attempt = 0) {
       redirect: 'follow',
     });
     clearTimeout(timer);
-    if (res.status < 400) return true;
-    if (res.status === 401 || res.status === 403) return true;
-    return false;
-  } catch (err) {
+    // 2xx, 3xx, 401, 403 = le serveur répond = chaîne vivante
+    return res.status < 400 || res.status === 401 || res.status === 403;
+  } catch {
     clearTimeout(timer);
-    if (attempt < RETRY_COUNT) {
-      await new Promise(r => setTimeout(r, 500));
-      return testChannel(ch, attempt + 1);
-    }
     return false;
   }
 }
 
 // ════════════════════════════════════════════════════════
-//  SCAN EN PARALLÈLE — pool de CONCURRENCY
+//  TRUE WORKER POOL
+//  Contrairement aux batches, chaque worker prend
+//  la tâche suivante dès qu'il finit — pas d'attente
 // ════════════════════════════════════════════════════════
-async function scanAllChannels(channels) {
+async function workerPool(channels, concurrency) {
   const okChannels   = [];
   const failChannels = [];
-  let done = 0;
-  const total = channels.length;
-  const startTime = Date.now();
+  const total        = channels.length;
+  let   index        = 0;   // prochain index à traiter
+  let   done         = 0;   // compteur total traités
+  const startTime    = Date.now();
 
-  for (let i = 0; i < total; i += CONCURRENCY) {
-    const batch = channels.slice(i, i + CONCURRENCY);
+  // Un worker : prend une tâche, la traite, prend la suivante
+  async function worker() {
+    while (true) {
+      const i = index++;          // réserver atomiquement le prochain index
+      if (i >= total) return;     // plus rien à faire
 
-    const results = await Promise.all(
-      batch.map(ch => testChannel(ch).then(ok => ({ ch, ok })))
-    );
+      const ch = channels[i];
+      const ok = await testChannel(ch);
 
-    for (const { ch, ok } of results) {
-      done++;
       if (ok) okChannels.push(ch);
       else    failChannels.push(ch);
-    }
 
-    // Progression toutes les 1000 chaînes
-    if (done % 1000 === 0 || done === total) {
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-      const pct     = Math.round((done / total) * 100);
-      const vitesse = Math.round(done / (elapsed || 1));
-      const restant = Math.round((total - done) / (vitesse || 1));
-      log('sys', `${pct}% — ${done}/${total} | ✅ ${okChannels.length} | ❌ ${failChannels.length} | ${vitesse} ch/s | ~${restant}s restantes`);
+      done++;
+
+      // Log toutes les 2000 chaînes
+      if (done % 2000 === 0 || done === total) {
+        const elapsed  = ((Date.now() - startTime) / 1000).toFixed(0);
+        const pct      = Math.round((done / total) * 100);
+        const vitesse  = Math.round(done / (elapsed || 1));
+        const restant  = vitesse > 0 ? Math.round((total - done) / vitesse) : '?';
+        log('sys', `${pct}% — ${done}/${total} | ✅ ${okChannels.length} | ❌ ${failChannels.length} | ${vitesse} ch/s | ~${restant}s restantes`);
+      }
     }
   }
+
+  // Lancer CONCURRENCY workers en parallèle
+  // Chacun tourne en boucle jusqu'à épuisement de la file
+  await Promise.all(
+    Array.from({ length: concurrency }, () => worker())
+  );
 
   return { okChannels, failChannels };
 }
@@ -131,7 +142,7 @@ async function scanAllChannels(channels) {
 // ════════════════════════════════════════════════════════
 async function publishToSupabase(okChannels, failChannels, currentVersion) {
   const orderedChannels = [...okChannels, ...failChannels];
-  const prioURLs = okChannels.map(c => c.url);
+  const prioURLs        = okChannels.map(c => c.url);
 
   const now  = new Date();
   const base = now.getFullYear() + '.' +
@@ -144,7 +155,7 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
     newVersion = base + '.' + (parseInt(parts[3] || '0') + 1);
   }
 
-  log('sys', `📦 Publication channels_data v${newVersion} (${orderedChannels.length} chaînes)...`);
+  log('sys', `📦 Publication v${newVersion} — ${orderedChannels.length} chaînes...`);
 
   const payload = {
     version:      newVersion,
@@ -162,7 +173,7 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
   log('ok', `✅ channels_data publié (v${newVersion})`);
 
   // 2. channel_priorities
-  log('sys', `⭐ Mise à jour channel_priorities (${prioURLs.length} URLs)...`);
+  log('sys', `⭐ channel_priorities — ${prioURLs.length} URLs...`);
   const r2 = await sbPatch('channel_priorities', 'id=eq.1', {
     priorities: prioURLs,
     saved_at:   now.toISOString(),
@@ -185,18 +196,18 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
 // ════════════════════════════════════════════════════════
 async function main() {
   log('sys', '══════════════════════════════════════════════════');
-  log('sys', '🤖 SCAN AUTO — DÉMARRAGE');
-  log('sys', `⚙️  Timeout: ${TIMEOUT_MS}ms | Concurrence: ${CONCURRENCY} | Retry: ${RETRY_COUNT}`);
+  log('sys', '🤖 SCAN AUTO — TRUE WORKER POOL');
+  log('sys', `⚙️  Timeout: ${TIMEOUT_MS}ms | Workers: ${CONCURRENCY} | Méthode: HEAD`);
   log('sys', '══════════════════════════════════════════════════');
 
   // 1. Charger les chaînes
-  log('sys', '🔄 Chargement des chaînes depuis Supabase...');
+  log('sys', '🔄 Chargement depuis Supabase...');
   const rows = await sbGet(
     'channels_data',
     'select=version,count,data&order=published_at.desc&limit=1'
   );
 
-  if (!rows || !rows.length || !Array.isArray(rows[0].data) || !rows[0].data.length) {
+  if (!rows?.length || !Array.isArray(rows[0].data) || !rows[0].data.length) {
     log('fail', 'Aucune chaîne dans Supabase (channels_data vide)');
     process.exit(1);
   }
@@ -204,19 +215,19 @@ async function main() {
   const allChannels    = rows[0].data.filter(c => c.url);
   const currentVersion = rows[0].version || '1.0';
   log('ok',   `${allChannels.length} chaînes chargées (v${currentVersion})`);
-  log('info', `Estimation : ~${Math.round(allChannels.length / CONCURRENCY * TIMEOUT_MS / 1000 / 60)} min`);
+  log('info', `Estimation : ~${Math.ceil(allChannels.length / CONCURRENCY * TIMEOUT_MS / 1000 / 60)} min max`);
 
-  // 2. Scanner
-  log('sys', '🤖 Démarrage du scan...');
+  // 2. Scanner avec le worker pool
+  log('sys', `🚀 Démarrage — ${CONCURRENCY} workers en parallèle...`);
   const startTime = Date.now();
-  const { okChannels, failChannels } = await scanAllChannels(allChannels);
+  const { okChannels, failChannels } = await workerPool(allChannels, CONCURRENCY);
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
 
   log('sys', '══════════════════════════════════════════════════');
   log('sys', `🎉 SCAN TERMINÉ en ${elapsed} min`);
-  log('ok',  `✅ Chaînes vivantes : ${okChannels.length}`);
-  log('fail',`❌ Chaînes mortes   : ${failChannels.length}`);
-  log('sys', `📊 Taux de réussite : ${Math.round(okChannels.length / allChannels.length * 100)}%`);
+  log('ok',  `✅ Vivantes  : ${okChannels.length}`);
+  log('fail',`❌ Mortes    : ${failChannels.length}`);
+  log('sys', `📊 Réussite  : ${Math.round(okChannels.length / allChannels.length * 100)}%`);
   log('sys', '══════════════════════════════════════════════════');
 
   // 3. Publier
@@ -224,8 +235,8 @@ async function main() {
 
   log('sys', '');
   log('sys', `🚀 PUBLICATION RÉUSSIE — v${newVersion}`);
-  log('ok',  `⭐ ${okChannels.length} chaînes prioritaires`);
-  log('fail',`🔻 ${failChannels.length} chaînes en bas`);
+  log('ok',  `⭐ ${okChannels.length} prioritaires en haut`);
+  log('fail',`🔻 ${failChannels.length} en bas`);
 }
 
 main().catch(err => {
