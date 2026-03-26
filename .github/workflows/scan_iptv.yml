@@ -1,3 +1,8 @@
+# ════════════════════════════════════════════════════════
+#  GitHub Actions — Scan Auto IPTV
+#  Version : Premier Scan (Maximum Absolu 6 Heures)
+# ════════════════════════════════════════════════════════
+
 name: 🤖 Scan Auto IPTV
 
 on:
@@ -9,7 +14,8 @@ jobs:
   scan:
     name: Scanner les chaînes IPTV
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 360 minutes est la limite maximale autorisée par GitHub
+    timeout-minutes: 360 
 
     steps:
       - name: 📥 Checkout du dépôt
@@ -25,3 +31,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: node scan.js
+
+      - name: 📊 Résumé
+        if: always()
+        run: echo "✅ Scan terminé !"
