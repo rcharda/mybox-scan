@@ -26,9 +26,6 @@ const TIMEOUT_MS   = 5_000;  // 5 secondes max par chaîne
 const CONCURRENCY  = 50;     // 50 chaînes testées en même temps
 const RETRY_COUNT  = 0;      // 0 retry pour aller au plus vite
 
-// ════════════════════════════════════════════════════════
-//  HELPERS
-// ════════════════════════════════════════════════════════
 function log(type, msg) {
   const icons = { ok: '✅', fail: '❌', info: 'ℹ️', warn: '⚠️', sys: '🔵' };
   console.log(`${icons[type] || '·'} ${msg}`);
@@ -61,9 +58,6 @@ async function sbPost(table, body) {
   return r;
 }
 
-// ════════════════════════════════════════════════════════
-//  TEST D'UNE CHAÎNE
-// ════════════════════════════════════════════════════════
 async function testChannel(ch, attempt = 0) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -94,9 +88,6 @@ async function testChannel(ch, attempt = 0) {
   }
 }
 
-// ════════════════════════════════════════════════════════
-//  SCAN EN PARALLÈLE
-// ════════════════════════════════════════════════════════
 async function scanAllChannels(channels) {
   const okChannels   = [];
   const failChannels = [];
@@ -120,7 +111,6 @@ async function scanAllChannels(channels) {
     }
 
     const pct = Math.round((done / total) * 100);
-    // Affichage condensé pour ne pas surcharger les logs de GitHub
     if (i % (CONCURRENCY * 5) === 0 || done === total) {
         log('sys', `Progression : ${pct}% (${done}/${total}) — ✅ ${okChannels.length} | ❌ ${failChannels.length}`);
     }
@@ -129,20 +119,12 @@ async function scanAllChannels(channels) {
   return { okChannels, failChannels };
 }
 
-// ════════════════════════════════════════════════════════
-//  PUBLICATION SUR SUPABASE (CLASSIQUE)
-// ════════════════════════════════════════════════════════
 async function publishToSupabase(okChannels, failChannels, currentVersion) {
-  
-  // Rejoint simplement les chaînes qui marchent avec celles qui sont mortes
   const orderedChannels = [...okChannels, ...failChannels];
   const prioURLs = okChannels.map(c => c.url);
 
-  // Calcul de la nouvelle version
   const now = new Date();
-  const base = now.getFullYear() + '.' +
-    String(now.getMonth() + 1).padStart(2, '0') + '.' +
-    String(now.getDate()).padStart(2, '0');
+  const base = now.getFullYear() + '.' + String(now.getMonth() + 1).padStart(2, '0') + '.' + String(now.getDate()).padStart(2, '0');
 
   const parts = (currentVersion || '1.0').split('.');
   let newVersion = base;
@@ -154,84 +136,27 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
 
   log('sys', `📦 Publication channels_data v${newVersion} (${orderedChannels.length} chaînes)...`);
 
-  // 1. Publier channels_data
-  const payload = {
-    version: newVersion,
-    count: orderedChannels.length,
-    published_at: now.toISOString(),
-    data: orderedChannels,
-  };
-
+  const payload = { version: newVersion, count: orderedChannels.length, published_at: now.toISOString(), data: orderedChannels };
   const r1 = await sbPatch('channels_data', 'id=eq.1', payload);
-  if (!r1.ok) {
-    log('warn', 'Pas de ligne id=1, création...');
-    await sbPost('channels_data', { id: 1, ...payload });
-  }
-  log('ok', `✅ channels_data publié (v${newVersion})`);
+  if (!r1.ok) await sbPost('channels_data', { id: 1, ...payload });
 
-  // 2. Publier channel_priorities (Toutes les chaînes qui marchent)
-  log('sys', `⭐ Mise à jour channel_priorities (${prioURLs.length} URLs qui fonctionnent)...`);
-  const r2 = await sbPatch('channel_priorities', 'id=eq.1', {
-    priorities: prioURLs,
-    saved_at: now.toISOString(),
-  });
-  if (!r2.ok) {
-    log('warn', 'Pas de ligne id=1, création...');
-    await sbPost('channel_priorities', {
-      id: 1,
-      priorities: prioURLs,
-      saved_at: now.toISOString(),
-    });
-  }
-  log('ok', `✅ channel_priorities mis à jour (${prioURLs.length} URLs)`);
+  log('sys', `⭐ Mise à jour channel_priorities (${prioURLs.length} URLs)...`);
+  const r2 = await sbPatch('channel_priorities', 'id=eq.1', { priorities: prioURLs, saved_at: now.toISOString() });
+  if (!r2.ok) await sbPost('channel_priorities', { id: 1, priorities: prioURLs, saved_at: now.toISOString() });
 
   return newVersion;
 }
 
-// ════════════════════════════════════════════════════════
-//  POINT D'ENTRÉE
-// ════════════════════════════════════════════════════════
 async function main() {
-  log('sys', '══════════════════════════════════════════════');
-  log('sys', '🤖 SCAN AUTO — DÉMARRAGE (Mode Turbo Simple)');
-  log('sys', `⏱  Timeout : ${TIMEOUT_MS / 1000}s | Concurrence : ${CONCURRENCY}`);
-  log('sys', '══════════════════════════════════════════════');
+  log('sys', '🤖 SCAN AUTO — DÉMARRAGE (Mode Turbo)');
+  const rows = await sbGet('channels_data', 'select=version,count,data&order=published_at.desc&limit=1');
+  if (!rows || !rows.length) process.exit(1);
 
-  log('sys', '🔄 Chargement des chaînes depuis Supabase...');
-  const rows = await sbGet(
-    'channels_data',
-    'select=version,count,data&order=published_at.desc&limit=1'
-  );
-
-  if (!rows || !rows.length || !Array.isArray(rows[0].data) || !rows[0].data.length) {
-    log('fail', 'Aucune chaîne dans Supabase (channels_data vide)');
-    process.exit(1);
-  }
-
-  const allChannels    = rows[0].data.filter(c => c.url);
+  const allChannels = rows[0].data.filter(c => c.url);
   const currentVersion = rows[0].version || '1.0';
-  log('ok', `${allChannels.length} chaînes chargées (v${currentVersion})`);
-
-  log('sys', '🤖 Démarrage du scan...');
-  const startTime = Date.now();
   const { okChannels, failChannels } = await scanAllChannels(allChannels);
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-  log('sys', '══════════════════════════════════════════════');
-  log('sys', `🎉 SCAN TERMINÉ en ${elapsed}s`);
-  log('ok',  `✅ Chaînes qui marchent : ${okChannels.length}`);
-  log('fail',`❌ Chaînes mortes       : ${failChannels.length}`);
-  log('sys', `📊 Taux de réussite     : ${Math.round(okChannels.length / allChannels.length * 100)}%`);
-  log('sys', '══════════════════════════════════════════════');
-
   const newVersion = await publishToSupabase(okChannels, failChannels, currentVersion);
-
-  log('sys', '');
   log('sys', `🚀 PUBLICATION RÉUSSIE — v${newVersion}`);
-  log('sys', `📦 ${allChannels.length} chaînes traitées et publiées.`);
 }
 
-main().catch(err => {
-  console.error('❌ Erreur fatale :', err.message);
-  process.exit(1);
-});
+main().catch(err => { console.error('Erreur:', err.message); process.exit(1); });
