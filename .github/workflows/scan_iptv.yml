@@ -1,37 +1,39 @@
 # ════════════════════════════════════════════════════════
-#  GitHub Actions — Scan Auto IPTV
-#  Version : Premier Scan (Maximum Absolu 6 Heures)
+#  GitHub Actions — Automatisation My Box Smart
+#  Synchronisé avec la méthode SuperAdmin
 # ════════════════════════════════════════════════════════
 
-name: 🤖 Scan Auto IPTV
+name: 🤖 Scan & Sync IPTV
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    # Se lance automatiquement chaque jour à 3h00 UTC (soit 4h00 au Bénin)
+    - cron: '0 3 * * *'
+  # Permet de lancer le scan manuellement depuis l'onglet Actions
   workflow_dispatch:
 
 jobs:
-  scan:
-    name: Scanner les chaînes IPTV
+  scan_job:
+    name: Nettoyage et Synchronisation
     runs-on: ubuntu-latest
-    # 360 minutes est la limite maximale autorisée par GitHub
-    timeout-minutes: 360 
+    # Sécurité : on laisse 120 minutes pour être large, même avec 31 000 chaînes
+    timeout-minutes: 300 
 
     steps:
-      - name: 📥 Checkout du dépôt
+      - name: 📥 Récupération du code
         uses: actions/checkout@v4
 
-      - name: ⚙️ Setup Node.js
+      - name: ⚙️ Configuration Node.js (Version 20)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: 🤖 Lancer le scan
+      - name: 🚀 Exécution du Scan Turbo
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: node scan.js
 
-      - name: 📊 Résumé
+      - name: 📊 Résumé du Workflow
         if: always()
-        run: echo "✅ Scan terminé !"
+        run: echo "Le scan synchronisé est terminé !"
