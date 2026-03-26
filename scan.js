@@ -1,36 +1,46 @@
 // ════════════════════════════════════════════════════════
-//  SCAN AUTO — VERSION SERVEUR (GitHub Actions)
-//  🚀 MODE TURBO SEUL (Sans filtre intelligent)
+//  SCAN AUTO — VERSION GITHUB ACTIONS
+//  Le scan fonctionne — seule la publication était cassée :
+//    ❌ PATCH id=eq.1  → échoue si la ligne n'existe pas
+//    ❌ POST  id=1     → bigserial refuse un id manuel
+//    ❌ erreurs jamais affichées → échec silencieux
+//  ✅ Fix : INSERT sans id (bigserial auto) + logs d'erreur
 // ════════════════════════════════════════════════════════
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("❌ Variables d'environnement manquantes : SUPABASE_URL et SUPABASE_KEY");
+  console.error("❌ Variables manquantes : SUPABASE_URL et SUPABASE_KEY");
   process.exit(1);
 }
 
 const SB_HEADERS_R = {
-  'apikey': SUPABASE_KEY,
+  'apikey':        SUPABASE_KEY,
   'Authorization': 'Bearer ' + SUPABASE_KEY,
 };
 const SB_HEADERS_W = {
   ...SB_HEADERS_R,
   'Content-Type': 'application/json',
-  'Prefer': 'return=representation',
+  'Prefer':       'return=minimal',
 };
 
-// ── 🚀 CONFIGURATION TURBO ─────────────────────────────
-const TIMEOUT_MS   = 5_000;  // 5 secondes max par chaîne
-const CONCURRENCY  = 50;     // 50 chaînes testées en même temps
-const RETRY_COUNT  = 0;      // 0 retry pour aller au plus vite
+// ── CONFIG ────────────────────────────────────────────
+const TIMEOUT_MS  = 5_000;  // 5s par chaîne
+const CONCURRENCY = 50;     // 50 workers en parallèle
 
+// ════════════════════════════════════════════════════════
+//  LOG
+// ════════════════════════════════════════════════════════
 function log(type, msg) {
   const icons = { ok: '✅', fail: '❌', info: 'ℹ️', warn: '⚠️', sys: '🔵' };
-  console.log(`${icons[type] || '·'} ${msg}`);
+  const ts = new Date().toLocaleTimeString('fr-FR');
+  console.log(`[${ts}] ${icons[type] || '·'} ${msg}`);
 }
 
+// ════════════════════════════════════════════════════════
+//  HELPERS SUPABASE
+// ════════════════════════════════════════════════════════
 async function sbGet(table, params = '') {
   const q = params ? '?' + params : '';
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${q}`, {
@@ -40,123 +50,241 @@ async function sbGet(table, params = '') {
   return r.json();
 }
 
-async function sbPatch(table, filter, body) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
-    method: 'PATCH',
-    headers: SB_HEADERS_W,
-    body: JSON.stringify(body),
-  });
-  return r;
-}
-
-async function sbPost(table, body) {
+// ✅ INSERT sans id — laisse bigserial générer l'id automatiquement
+async function sbInsert(table, body) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: 'POST',
-    headers: { ...SB_HEADERS_W, 'Prefer': 'return=minimal' },
-    body: JSON.stringify(body),
+    method:  'POST',
+    headers: SB_HEADERS_W,
+    body:    JSON.stringify(body),
   });
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`sbInsert ${table}: HTTP ${r.status} — ${err}`);
+  }
   return r;
 }
 
-async function testChannel(ch, attempt = 0) {
+// ✅ UPSERT sur id=1 (channel_priorities a une vraie PK fixe)
+async function sbUpsert(table, body) {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/${table}?on_conflict=id`,
+    {
+      method:  'POST',
+      headers: {
+        ...SB_HEADERS_W,
+        'Prefer': 'resolution=merge-duplicates,return=minimal',
+      },
+      body: JSON.stringify(body),
+    }
+  );
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`sbUpsert ${table}: HTTP ${r.status} — ${err}`);
+  }
+  return r;
+}
+
+// ════════════════════════════════════════════════════════
+//  TEST D'UNE CHAÎNE
+// ════════════════════════════════════════════════════════
+async function testChannel(ch) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
   try {
     const res = await fetch(ch.url, {
-      method: 'GET',
-      signal: controller.signal,
+      method:   'GET',
+      signal:   controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; IPTVScanner/1.0)',
-        'Accept': '*/*',
+        'Accept':     '*/*',
       },
       redirect: 'follow',
     });
     clearTimeout(timer);
-
-    if (res.status < 400) return true;
-    if (res.status === 401 || res.status === 403) return true;
-
-    return false;
-  } catch (err) {
+    return res.status < 400 || res.status === 401 || res.status === 403;
+  } catch {
     clearTimeout(timer);
-    if (attempt < RETRY_COUNT) {
-      await new Promise(r => setTimeout(r, 1000));
-      return testChannel(ch, attempt + 1);
-    }
     return false;
   }
 }
 
+// ════════════════════════════════════════════════════════
+//  SCAN — batch de 50 en parallèle
+// ════════════════════════════════════════════════════════
 async function scanAllChannels(channels) {
   const okChannels   = [];
   const failChannels = [];
-  let done = 0;
+  let done  = 0;
   const total = channels.length;
 
   for (let i = 0; i < total; i += CONCURRENCY) {
-    const batch = channels.slice(i, i + CONCURRENCY);
-
+    const batch   = channels.slice(i, i + CONCURRENCY);
     const results = await Promise.all(
       batch.map(ch => testChannel(ch).then(ok => ({ ch, ok })))
     );
 
     for (const { ch, ok } of results) {
       done++;
-      if (ok) {
-        okChannels.push(ch);
-      } else {
-        failChannels.push(ch);
-      }
+      ok ? okChannels.push(ch) : failChannels.push(ch);
     }
 
-    const pct = Math.round((done / total) * 100);
+    const pct = Math.round(done / total * 100);
     if (i % (CONCURRENCY * 5) === 0 || done === total) {
-        log('sys', `Progression : ${pct}% (${done}/${total}) — ✅ ${okChannels.length} | ❌ ${failChannels.length}`);
+      log('sys', `${pct}% (${done}/${total}) — ✅ ${okChannels.length} | ❌ ${failChannels.length}`);
     }
   }
 
   return { okChannels, failChannels };
 }
 
-async function publishToSupabase(okChannels, failChannels, currentVersion) {
-  const orderedChannels = [...okChannels, ...failChannels];
-  const prioURLs = okChannels.map(c => c.url);
+// ════════════════════════════════════════════════════════
+//  PUBLICATION
+//
+//  Ordre final (comme superadmin onglet Priorités) :
+//    1. prioritaires vivantes  (ordre manuel)
+//    2. autres vivantes
+//    3. prioritaires mortes    (ordre manuel)
+//    4. autres mortes
+// ════════════════════════════════════════════════════════
+async function publishToSupabase(allChannels, okChannels, failChannels, priorityURLs) {
 
+  // ── Trier en respectant les priorités manuelles ──────
+  const prioSet   = new Set(priorityURLs);
+  const prioIndex = new Map(priorityURLs.map((url, i) => [url, i]));
+
+  const prioOk    = okChannels  .filter(c =>  prioSet.has(c.url));
+  const otherOk   = okChannels  .filter(c => !prioSet.has(c.url));
+  const prioFail  = failChannels.filter(c =>  prioSet.has(c.url));
+  const otherFail = failChannels.filter(c => !prioSet.has(c.url));
+
+  prioOk  .sort((a, b) => (prioIndex.get(a.url) ?? 0) - (prioIndex.get(b.url) ?? 0));
+  prioFail.sort((a, b) => (prioIndex.get(a.url) ?? 0) - (prioIndex.get(b.url) ?? 0));
+
+  const newData = [...prioOk, ...otherOk, ...prioFail, ...otherFail];
+
+  // ── Version au format superadmin : YYYY.MM.DD-HHMM ──
   const now = new Date();
-  const base = now.getFullYear() + '.' + String(now.getMonth() + 1).padStart(2, '0') + '.' + String(now.getDate()).padStart(2, '0');
+  const newVersion =
+    now.getFullYear() + '.' +
+    String(now.getMonth() + 1).padStart(2, '0') + '.' +
+    String(now.getDate()).padStart(2, '0') + '-' +
+    String(now.getHours()).padStart(2, '0') +
+    String(now.getMinutes()).padStart(2, '0');
 
-  const parts = (currentVersion || '1.0').split('.');
-  let newVersion = base;
-  if (parts.slice(0, 3).join('.') === base && parts.length > 3) {
-    newVersion = base + '.' + (parseInt(parts[3] || '0') + 1);
-  } else if (parts.slice(0, 3).join('.') === base) {
-    newVersion = base + '.1';
+  const kb = (new Blob([JSON.stringify(newData)]).size / 1024).toFixed(1);
+
+  // ── ÉTAPE 1 : INSERT dans channels_data ─────────────
+  log('sys', `📦 INSERT channels_data v${newVersion} — ${newData.length} chaînes — ${kb} KB...`);
+  try {
+    await sbInsert('channels_data', {
+      version:      newVersion,
+      data:         newData,
+      note:         `${prioOk.length} prioritaires en tête — scan GitHub Actions`,
+      size_kb:      parseFloat(kb),
+      published_at: now.toISOString(),
+    });
+    log('ok', `✅ channels_data publié (v${newVersion})`);
+  } catch (e) {
+    log('fail', `❌ channels_data ÉCHEC : ${e.message}`);
+    throw e;
   }
 
-  log('sys', `📦 Publication channels_data v${newVersion} (${orderedChannels.length} chaînes)...`);
+  // ── ÉTAPE 2 : UPSERT channel_priorities ─────────────
+  const alivePrioURLs = priorityURLs.filter(u => okChannels.some(c => c.url === u));
+  log('sys', `⭐ UPSERT channel_priorities — ${alivePrioURLs.length}/${priorityURLs.length} vivantes...`);
+  try {
+    await sbUpsert('channel_priorities', {
+      id:         1,
+      priorities: alivePrioURLs,
+      count:      alivePrioURLs.length,
+      saved_at:   now.toISOString(),
+    });
+    log('ok', `✅ channel_priorities mis à jour`);
+  } catch (e) {
+    log('fail', `❌ channel_priorities ÉCHEC : ${e.message}`);
+    throw e;
+  }
 
-  const payload = { version: newVersion, count: orderedChannels.length, published_at: now.toISOString(), data: orderedChannels };
-  const r1 = await sbPatch('channels_data', 'id=eq.1', payload);
-  if (!r1.ok) await sbPost('channels_data', { id: 1, ...payload });
-
-  log('sys', `⭐ Mise à jour channel_priorities (${prioURLs.length} URLs)...`);
-  const r2 = await sbPatch('channel_priorities', 'id=eq.1', { priorities: prioURLs, saved_at: now.toISOString() });
-  if (!r2.ok) await sbPost('channel_priorities', { id: 1, priorities: prioURLs, saved_at: now.toISOString() });
-
-  return newVersion;
+  return { newVersion, prioOk, prioFail, otherOk, otherFail };
 }
 
+// ════════════════════════════════════════════════════════
+//  MAIN
+// ════════════════════════════════════════════════════════
 async function main() {
-  log('sys', '🤖 SCAN AUTO — DÉMARRAGE (Mode Turbo)');
-  const rows = await sbGet('channels_data', 'select=version,count,data&order=published_at.desc&limit=1');
-  if (!rows || !rows.length) process.exit(1);
+  log('sys', '══════════════════════════════════════════════════');
+  log('sys', '🤖 SCAN AUTO — DÉMARRAGE');
+  log('sys', `⚙️  Timeout: ${TIMEOUT_MS}ms | Workers: ${CONCURRENCY}`);
+  log('sys', '══════════════════════════════════════════════════');
 
-  const allChannels = rows[0].data.filter(c => c.url);
-  const currentVersion = rows[0].version || '1.0';
+  // 1. Charger les chaînes
+  log('sys', '🔄 Chargement des chaînes depuis channels_data...');
+  let allChannels = [];
+  try {
+    const rows = await sbGet(
+      'channels_data',
+      'select=version,count,data&order=published_at.desc&limit=1'
+    );
+    if (!rows?.length || !Array.isArray(rows[0].data) || !rows[0].data.length) {
+      log('fail', 'channels_data vide ou introuvable !');
+      process.exit(1);
+    }
+    allChannels = rows[0].data.filter(c => c?.url);
+    log('ok', `${allChannels.length} chaînes chargées (v${rows[0].version})`);
+  } catch (e) {
+    log('fail', `Erreur chargement : ${e.message}`);
+    process.exit(1);
+  }
+
+  // 2. Charger les priorités manuelles
+  log('sys', '⭐ Chargement des priorités manuelles...');
+  let priorityURLs = [];
+  try {
+    const prows = await sbGet(
+      'channel_priorities',
+      'select=priorities&id=eq.1&limit=1'
+    );
+    if (prows?.length && Array.isArray(prows[0].priorities)) {
+      priorityURLs = prows[0].priorities.filter(u =>
+        allChannels.some(c => c.url === u)
+      );
+      log('ok', `${priorityURLs.length} priorités chargées`);
+    } else {
+      log('warn', 'Aucune priorité manuelle — ordre par défaut');
+    }
+  } catch (e) {
+    log('warn', `Priorités non chargées : ${e.message} — on continue sans`);
+  }
+
+  const estMin = Math.ceil(allChannels.length / CONCURRENCY * TIMEOUT_MS / 1000 / 60);
+  log('info', `~${estMin} min estimées pour ${allChannels.length} chaînes`);
+
+  // 3. Scanner
+  log('sys', `🚀 Scan — ${CONCURRENCY} workers...`);
+  const t0 = Date.now();
   const { okChannels, failChannels } = await scanAllChannels(allChannels);
-  const newVersion = await publishToSupabase(okChannels, failChannels, currentVersion);
+  const elapsed = ((Date.now() - t0) / 1000 / 60).toFixed(1);
+
+  log('sys', '══════════════════════════════════════════════════');
+  log('sys', `🎉 SCAN TERMINÉ en ${elapsed} min`);
+  log('ok',  `✅ Vivantes : ${okChannels.length}`);
+  log('fail',`❌ Mortes   : ${failChannels.length}`);
+  log('sys', `📊 Réussite : ${Math.round(okChannels.length / allChannels.length * 100)}%`);
+  log('sys', '══════════════════════════════════════════════════');
+
+  // 4. Publier
+  const { newVersion, prioOk, prioFail, otherOk, otherFail } =
+    await publishToSupabase(allChannels, okChannels, failChannels, priorityURLs);
+
+  log('sys', '');
   log('sys', `🚀 PUBLICATION RÉUSSIE — v${newVersion}`);
+  log('ok',  `⭐ Prio vivantes   : ${prioOk.length}`);
+  log('ok',  `📺 Autres vivantes : ${otherOk.length}`);
+  log('fail',`💀 Prio mortes     : ${prioFail.length}`);
+  log('fail',`🔻 Autres mortes   : ${otherFail.length}`);
 }
 
-main().catch(err => { console.error('Erreur:', err.message); process.exit(1); });
+main().catch(err => {
+  console.error('❌ Erreur fatale :', err.message);
+  process.exit(1);
+});
