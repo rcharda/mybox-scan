@@ -2,7 +2,6 @@
 #  GitHub Actions — Scan Auto IPTV
 #  Optimisé pour 31 000+ chaînes (~21 min)
 # ════════════════════════════════════════════════════════
-
 name: 🤖 Scan Auto IPTV
 
 on:
@@ -25,7 +24,7 @@ jobs:
   scan:
     name: Scanner les chaînes IPTV
     runs-on: ubuntu-latest
-    timeout-minutes: 300    # 31 000 chaînes ≈ 21 min, marge jusqu'à 45 min
+    timeout-minutes: 45     # ~21 min réel + marge raisonnable (pas 300 = 5h !)
 
     steps:
       - name: 📥 Checkout du dépôt
