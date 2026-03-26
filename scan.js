@@ -28,8 +28,8 @@ const SB_HEADERS_W = {
 };
 
 // ── CONFIG ────────────────────────────────────────────
-const TIMEOUT_MS  = 3_000;   // 3 s par chaîne
-const CONCURRENCY = 300;     // workers parallèles
+const TIMEOUT_MS  = 3_000;  // 3 s par chaîne
+const CONCURRENCY = 50;     // 50 workers parallèles (qualité > vitesse)
 
 // ════════════════════════════════════════════════════════
 //  HELPERS LOG
@@ -112,11 +112,11 @@ async function testChannel(ch) {
 //  WORKER POOL
 // ════════════════════════════════════════════════════════
 async function workerPool(channels, concurrency) {
-  const results  = new Map();   // url → true/false
-  const total    = channels.length;
-  let   index    = 0;
-  let   done     = 0;
-  const t0       = Date.now();
+  const results = new Map();   // url → true/false
+  const total   = channels.length;
+  let   index   = 0;
+  let   done    = 0;
+  const t0      = Date.now();
 
   async function worker() {
     while (true) {
@@ -125,13 +125,13 @@ async function workerPool(channels, concurrency) {
       const ch = channels[i];
       results.set(ch.url, await testChannel(ch));
       done++;
-      if (done % 2000 === 0 || done === total) {
+      if (done % 1000 === 0 || done === total) {
         const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
         const pct     = Math.round(done / total * 100);
         const vit     = Math.round(done / (elapsed || 1));
         const rest    = vit > 0 ? Math.round((total - done) / vit) : '?';
         const ok      = [...results.values()].filter(Boolean).length;
-        log('sys', `${pct}% — ${done}/${total} | ✅ ${ok} | ❌ ${done - ok} | ${vit} ch/s | ~${rest}s`);
+        log('sys', `${pct}% — ${done}/${total} | ✅ ${ok} | ❌ ${done - ok} | ${vit} ch/s | ~${rest}s restantes`);
       }
     }
   }
@@ -144,15 +144,14 @@ async function workerPool(channels, concurrency) {
 //  PUBLICATION — reproduit prioSaveAndPublish() du superadmin
 //
 //  Ordre final :
-//    1. chaînes prioritaires vivantes  (ordre de priorité)
+//    1. chaînes prioritaires vivantes  (ordre de priorité manuel)
 //    2. autres chaînes vivantes
-//    3. chaînes prioritaires mortes    (ordre de priorité)
+//    3. chaînes prioritaires mortes    (ordre de priorité manuel)
 //    4. autres chaînes mortes
 // ════════════════════════════════════════════════════════
 async function publishToSupabase(allChannels, scanResults, priorityURLs) {
   const prioSet = new Set(priorityURLs);
 
-  // Séparer en 4 groupes
   const prioOk    = [];
   const prioFail  = [];
   const otherOk   = [];
@@ -167,14 +166,14 @@ async function publishToSupabase(allChannels, scanResults, priorityURLs) {
     }
   }
 
-  // Respecter l'ordre de priorité manuel dans prioOk et prioFail
+  // Respecter l'ordre de priorité manuel
   const prioIndex = new Map(priorityURLs.map((url, i) => [url, i]));
   prioOk.sort(  (a, b) => (prioIndex.get(a.url) ?? 0) - (prioIndex.get(b.url) ?? 0));
   prioFail.sort((a, b) => (prioIndex.get(a.url) ?? 0) - (prioIndex.get(b.url) ?? 0));
 
   const newData = [...prioOk, ...otherOk, ...prioFail, ...otherFail];
 
-  // Version identique au format superadmin : YYYY.MM.DD-HHMM
+  // Version au format superadmin : YYYY.MM.DD-HHMM
   const now = new Date();
   const newVersion =
     now.getFullYear() + '.' +
@@ -198,15 +197,14 @@ async function publishToSupabase(allChannels, scanResults, priorityURLs) {
   log('ok', `✅ channels_data inséré (v${newVersion})`);
 
   // ── ÉTAPE 2 : UPSERT channel_priorities ──
-  //    On garde uniquement les URLs prioritaires encore vivantes en tête,
-  //    mais on conserve aussi les mortes pour que l'admin les retrouve.
-  const aliveprioURLs = priorityURLs.filter(u => scanResults.get(u) === true);
+  // On garde toutes les URLs prioritaires (vivantes en tête pour les clients)
+  const alivePrioURLs = priorityURLs.filter(u => scanResults.get(u) === true);
 
-  log('sys', `⭐ UPSERT channel_priorities — ${aliveprioURLs.length} vivantes / ${priorityURLs.length} totales...`);
+  log('sys', `⭐ UPSERT channel_priorities — ${alivePrioURLs.length} vivantes / ${priorityURLs.length} totales...`);
   await sbUpsert('channel_priorities', {
     id:         1,
-    priorities: aliveprioURLs,    // seulement les vivantes restent en tête
-    count:      aliveprioURLs.length,
+    priorities: alivePrioURLs,
+    count:      alivePrioURLs.length,
     saved_at:   now.toISOString(),
   });
   log('ok', `✅ channel_priorities mis à jour`);
@@ -219,7 +217,7 @@ async function publishToSupabase(allChannels, scanResults, priorityURLs) {
 // ════════════════════════════════════════════════════════
 async function main() {
   log('sys', '══════════════════════════════════════════════════');
-  log('sys', '🤖 SCAN AUTO — WORKER POOL (mode superadmin)');
+  log('sys', '🤖 SCAN AUTO — 50 WORKERS (mode qualité)');
   log('sys', `⚙️  Timeout: ${TIMEOUT_MS}ms | Workers: ${CONCURRENCY}`);
   log('sys', '══════════════════════════════════════════════════');
 
@@ -263,16 +261,17 @@ async function main() {
       );
       log('ok', `${priorityURLs.length} URLs prioritaires chargées`);
     } else {
-      log('warn', 'Aucune priorité manuelle trouvée — scan sans priorité');
+      log('warn', 'Aucune priorité manuelle — scan sans priorité');
     }
   } catch (e) {
     log('warn', `Impossible de charger les priorités : ${e.message} — on continue sans`);
   }
 
-  log('info', `Estimation : ~${Math.ceil(allChannels.length / CONCURRENCY * TIMEOUT_MS / 1000 / 60)} min max`);
+  const estMin = Math.ceil(allChannels.length / CONCURRENCY * TIMEOUT_MS / 1000 / 60);
+  log('info', `Estimation : ~${estMin} min max pour ${allChannels.length} chaînes à ${CONCURRENCY} workers`);
 
   // 3. Scanner
-  log('sys', `🚀 Démarrage — ${CONCURRENCY} workers...`);
+  log('sys', `🚀 Démarrage — ${CONCURRENCY} workers en parallèle...`);
   const t0 = Date.now();
   const scanResults = await workerPool(allChannels, CONCURRENCY);
   const elapsed = ((Date.now() - t0) / 1000 / 60).toFixed(1);
