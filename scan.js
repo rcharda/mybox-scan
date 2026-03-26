@@ -1,7 +1,6 @@
 // ════════════════════════════════════════════════════════
 //  SCAN AUTO — VERSION SERVEUR (GitHub Actions)
-//  Reproduit la logique de onglet_scan_auto.html
-//  sans navigateur, via des requêtes HTTP simples
+//  Optimisé pour 31 000+ chaînes (~21 min)
 // ════════════════════════════════════════════════════════
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -22,50 +21,46 @@ const SB_HEADERS_W = {
   'Prefer': 'return=representation',
 };
 
-// ── CONFIG ────────────────────────────────────────────
-const TIMEOUT_MS   = 10_000; // 10 secondes par chaîne
-const CONCURRENCY  = 50;     // 50 chaînes testées en parallèle
-const RETRY_COUNT  = 1;      // 1 retry si timeout
+// ── CONFIG OPTIMISÉE 31 000 chaînes ──────────────────
+const TIMEOUT_MS  = 4_000;  // 4s par chaîne
+const CONCURRENCY = 100;    // 100 chaînes en parallèle
+const RETRY_COUNT = 1;      // 1 retry si échec réseau
 
 // ════════════════════════════════════════════════════════
 //  HELPERS
 // ════════════════════════════════════════════════════════
 function log(type, msg) {
   const icons = { ok: '✅', fail: '❌', info: 'ℹ️', warn: '⚠️', sys: '🔵' };
-  console.log(`${icons[type] || '·'} ${msg}`);
+  const ts = new Date().toLocaleTimeString('fr-FR');
+  console.log(`[${ts}] ${icons[type] || '·'} ${msg}`);
 }
 
 async function sbGet(table, params = '') {
   const q = params ? '?' + params : '';
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${q}`, {
-    headers: SB_HEADERS_R,
-  });
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${q}`, { headers: SB_HEADERS_R });
   if (!r.ok) throw new Error(`sbGet ${table}: ${await r.text()}`);
   return r.json();
 }
 
 async function sbPatch(table, filter, body) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+  return fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
     method: 'PATCH',
     headers: SB_HEADERS_W,
     body: JSON.stringify(body),
   });
-  return r;
 }
 
 async function sbPost(table, body) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+  return fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
     method: 'POST',
     headers: { ...SB_HEADERS_W, 'Prefer': 'return=minimal' },
     body: JSON.stringify(body),
   });
-  return r;
 }
 
 // ════════════════════════════════════════════════════════
-//  TEST D'UNE CHAÎNE (équivalent de testChannel() du HTML)
-//  On fait un GET HTTP sur l'URL .m3u8 ou le stream.
-//  Si la réponse est 2xx ou 3xx → chaîne vivante.
+//  TEST D'UNE CHAÎNE — GET HTTP simple
+//  2xx / 3xx / 401 / 403 = chaîne vivante
 // ════════════════════════════════════════════════════════
 async function testChannel(ch, attempt = 0) {
   const controller = new AbortController();
@@ -82,19 +77,13 @@ async function testChannel(ch, attempt = 0) {
       redirect: 'follow',
     });
     clearTimeout(timer);
-
-    // 2xx ou 3xx = le flux répond
     if (res.status < 400) return true;
-
-    // 401/403 = protégé mais existe
     if (res.status === 401 || res.status === 403) return true;
-
     return false;
   } catch (err) {
     clearTimeout(timer);
-    // Retry une fois en cas de timeout réseau
     if (attempt < RETRY_COUNT) {
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 500));
       return testChannel(ch, attempt + 1);
     }
     return false;
@@ -102,15 +91,15 @@ async function testChannel(ch, attempt = 0) {
 }
 
 // ════════════════════════════════════════════════════════
-//  SCAN EN PARALLÈLE (pool de CONCURRENCY)
+//  SCAN EN PARALLÈLE — pool de CONCURRENCY
 // ════════════════════════════════════════════════════════
 async function scanAllChannels(channels) {
   const okChannels   = [];
   const failChannels = [];
   let done = 0;
   const total = channels.length;
+  const startTime = Date.now();
 
-  // Découper en batches de CONCURRENCY
   for (let i = 0; i < total; i += CONCURRENCY) {
     const batch = channels.slice(i, i + CONCURRENCY);
 
@@ -120,72 +109,70 @@ async function scanAllChannels(channels) {
 
     for (const { ch, ok } of results) {
       done++;
-      if (ok) {
-        okChannels.push(ch);
-        log('ok', `[${done}/${total}] MARCHE  → ${ch.name || ch.url}`);
-      } else {
-        failChannels.push(ch);
-        log('fail', `[${done}/${total}] MORTE   → ${ch.name || ch.url}`);
-      }
+      if (ok) okChannels.push(ch);
+      else    failChannels.push(ch);
     }
 
-    const pct = Math.round((done / total) * 100);
-    log('sys', `Progression : ${pct}% (${done}/${total}) — ✅ ${okChannels.length} | ❌ ${failChannels.length}`);
+    // Progression toutes les 1000 chaînes
+    if (done % 1000 === 0 || done === total) {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      const pct     = Math.round((done / total) * 100);
+      const vitesse = Math.round(done / (elapsed || 1));
+      const restant = Math.round((total - done) / (vitesse || 1));
+      log('sys', `${pct}% — ${done}/${total} | ✅ ${okChannels.length} | ❌ ${failChannels.length} | ${vitesse} ch/s | ~${restant}s restantes`);
+    }
   }
 
   return { okChannels, failChannels };
 }
 
 // ════════════════════════════════════════════════════════
-//  PUBLICATION SUR SUPABASE (identique au HTML)
+//  PUBLICATION SUR SUPABASE
 // ════════════════════════════════════════════════════════
 async function publishToSupabase(okChannels, failChannels, currentVersion) {
   const orderedChannels = [...okChannels, ...failChannels];
   const prioURLs = okChannels.map(c => c.url);
 
-  // Calcul de la nouvelle version
-  const now = new Date();
+  const now  = new Date();
   const base = now.getFullYear() + '.' +
     String(now.getMonth() + 1).padStart(2, '0') + '.' +
     String(now.getDate()).padStart(2, '0');
 
   const parts = (currentVersion || '1.0').split('.');
   let newVersion = base;
-  if (parts.slice(0, 3).join('.') === base && parts.length > 3) {
+  if (parts.slice(0, 3).join('.') === base) {
     newVersion = base + '.' + (parseInt(parts[3] || '0') + 1);
-  } else if (parts.slice(0, 3).join('.') === base) {
-    newVersion = base + '.1';
   }
 
   log('sys', `📦 Publication channels_data v${newVersion} (${orderedChannels.length} chaînes)...`);
 
-  // 1. Publier channels_data
   const payload = {
-    version: newVersion,
-    count: orderedChannels.length,
+    version:      newVersion,
+    count:        orderedChannels.length,
     published_at: now.toISOString(),
-    data: orderedChannels,
+    data:         orderedChannels,
   };
 
+  // 1. channels_data
   const r1 = await sbPatch('channels_data', 'id=eq.1', payload);
   if (!r1.ok) {
-    log('warn', 'Pas de ligne id=1, création...');
+    log('warn', 'Pas de ligne id=1 → création...');
     await sbPost('channels_data', { id: 1, ...payload });
   }
   log('ok', `✅ channels_data publié (v${newVersion})`);
 
-  // 2. Publier channel_priorities
+  // 2. channel_priorities
   log('sys', `⭐ Mise à jour channel_priorities (${prioURLs.length} URLs)...`);
   const r2 = await sbPatch('channel_priorities', 'id=eq.1', {
     priorities: prioURLs,
-    saved_at: now.toISOString(),
+    saved_at:   now.toISOString(),
   });
   if (!r2.ok) {
-    log('warn', 'Pas de ligne id=1, création...');
+    log('warn', 'Pas de ligne id=1 → création...');
     await sbPost('channel_priorities', {
-      id: 1,
+      id:         1,
       priorities: prioURLs,
-      saved_at: now.toISOString(),
+      saved_at:   now.toISOString(),
     });
   }
   log('ok', `✅ channel_priorities mis à jour (${prioURLs.length} prioritaires)`);
@@ -197,12 +184,12 @@ async function publishToSupabase(okChannels, failChannels, currentVersion) {
 //  POINT D'ENTRÉE
 // ════════════════════════════════════════════════════════
 async function main() {
-  log('sys', '══════════════════════════════════════════════');
-  log('sys', '🤖 SCAN AUTO — DÉMARRAGE (version serveur)');
-  log('sys', `⏱  Timeout : ${TIMEOUT_MS / 1000}s | Concurrence : ${CONCURRENCY}`);
-  log('sys', '══════════════════════════════════════════════');
+  log('sys', '══════════════════════════════════════════════════');
+  log('sys', '🤖 SCAN AUTO — DÉMARRAGE');
+  log('sys', `⚙️  Timeout: ${TIMEOUT_MS}ms | Concurrence: ${CONCURRENCY} | Retry: ${RETRY_COUNT}`);
+  log('sys', '══════════════════════════════════════════════════');
 
-  // 1. Charger les chaînes depuis Supabase
+  // 1. Charger les chaînes
   log('sys', '🔄 Chargement des chaînes depuis Supabase...');
   const rows = await sbGet(
     'channels_data',
@@ -216,29 +203,29 @@ async function main() {
 
   const allChannels    = rows[0].data.filter(c => c.url);
   const currentVersion = rows[0].version || '1.0';
-  log('ok', `${allChannels.length} chaînes chargées (v${currentVersion})`);
+  log('ok',   `${allChannels.length} chaînes chargées (v${currentVersion})`);
+  log('info', `Estimation : ~${Math.round(allChannels.length / CONCURRENCY * TIMEOUT_MS / 1000 / 60)} min`);
 
-  // 2. Scanner toutes les chaînes
+  // 2. Scanner
   log('sys', '🤖 Démarrage du scan...');
   const startTime = Date.now();
   const { okChannels, failChannels } = await scanAllChannels(allChannels);
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
 
-  log('sys', '══════════════════════════════════════════════');
-  log('sys', `🎉 SCAN TERMINÉ en ${elapsed}s`);
-  log('ok',  `✅ Chaînes qui marchent : ${okChannels.length}`);
-  log('fail',`❌ Chaînes mortes       : ${failChannels.length}`);
-  log('sys', `📊 Taux de réussite     : ${Math.round(okChannels.length / allChannels.length * 100)}%`);
-  log('sys', '══════════════════════════════════════════════');
+  log('sys', '══════════════════════════════════════════════════');
+  log('sys', `🎉 SCAN TERMINÉ en ${elapsed} min`);
+  log('ok',  `✅ Chaînes vivantes : ${okChannels.length}`);
+  log('fail',`❌ Chaînes mortes   : ${failChannels.length}`);
+  log('sys', `📊 Taux de réussite : ${Math.round(okChannels.length / allChannels.length * 100)}%`);
+  log('sys', '══════════════════════════════════════════════════');
 
-  // 3. Publier sur Supabase
+  // 3. Publier
   const newVersion = await publishToSupabase(okChannels, failChannels, currentVersion);
 
   log('sys', '');
   log('sys', `🚀 PUBLICATION RÉUSSIE — v${newVersion}`);
-  log('sys', `📦 ${allChannels.length} chaînes publiées`);
-  log('ok',  `⭐ ${okChannels.length} chaînes prioritaires en haut`);
-  log('fail',`🔻 ${failChannels.length} chaînes mortes en bas`);
+  log('ok',  `⭐ ${okChannels.length} chaînes prioritaires`);
+  log('fail',`🔻 ${failChannels.length} chaînes en bas`);
 }
 
 main().catch(err => {
