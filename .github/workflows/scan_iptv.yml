@@ -1,39 +1,54 @@
 # ════════════════════════════════════════════════════════
-#  GitHub Actions — Automatisation My Box Smart
-#  Synchronisé avec la méthode SuperAdmin
+#  GitHub Actions — Scan Auto IPTV
+#  Lance scan.js automatiquement tous les jours à 6h UTC
+#  (ou manuellement depuis l'onglet "Actions" de GitHub)
 # ════════════════════════════════════════════════════════
 
-name: 🤖 Scan & Sync IPTV
+name: 🤖 Scan Auto IPTV
 
 on:
+  # ── Planification automatique ──────────────────────────
   schedule:
-    # Se lance automatiquement chaque jour à 3h00 UTC (soit 4h00 au Bénin)
-    - cron: '0 3 * * *'
-  # Permet de lancer le scan manuellement depuis l'onglet Actions
+    - cron: '0 6 * * *'    # Tous les jours à 6h00 UTC
+    # Autres exemples :
+    # - cron: '0 */12 * * *'  # Toutes les 12h
+    # - cron: '0 6 * * 1'     # Tous les lundis à 6h
+
+  # ── Lancement manuel depuis GitHub.com ─────────────────
   workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Raison du scan manuel (optionnel)'
+        required: false
+        default: 'Scan manuel'
 
 jobs:
-  scan_job:
-    name: Nettoyage et Synchronisation
+  scan:
+    name: Scanner les chaînes IPTV
     runs-on: ubuntu-latest
-    # Sécurité : on laisse 120 minutes pour être large, même avec 31 000 chaînes
-    timeout-minutes: 300 
+    timeout-minutes: 60   # Arrêt forcé après 60 min
 
     steps:
-      - name: 📥 Récupération du code
+      # 1. Télécharger le code du dépôt
+      - name: 📥 Checkout du dépôt
         uses: actions/checkout@v4
 
-      - name: ⚙️ Configuration Node.js (Version 20)
+      # 2. Configurer Node.js
+      - name: ⚙️ Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: 🚀 Exécution du Scan Turbo
+      # 3. Lancer le scan
+      #    Les secrets SUPABASE_URL et SUPABASE_KEY sont
+      #    configurés dans Settings → Secrets → Actions
+      - name: 🤖 Lancer le scan
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: node scan.js
 
-      - name: 📊 Résumé du Workflow
+      # 4. (Optionnel) Afficher un résumé dans l'interface GitHub
+      - name: 📊 Résumé
         if: always()
-        run: echo "Le scan synchronisé est terminé !"
+        run: echo "✅ Scan terminé — voir les logs ci-dessus pour les détails"
