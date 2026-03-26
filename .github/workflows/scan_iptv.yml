@@ -1,49 +1,27 @@
-# ════════════════════════════════════════════════════════
-#  GitHub Actions — Scan Auto IPTV
-#  Lance scan.js automatiquement tous les jours à 6h UTC
-#  (ou manuellement depuis l'onglet "Actions" de GitHub)
-# ════════════════════════════════════════════════════════
-
 name: 🤖 Scan Auto IPTV
 
 on:
-  # ── Planification automatique ──────────────────────────
   schedule:
-    - cron: '0 6 * * *'    # Se lance seul tous les jours à 6h00 UTC
-
-  # ── Lancement manuel depuis GitHub.com ─────────────────
+    - cron: '0 6 * * *'
   workflow_dispatch:
-    inputs:
-      reason:
-        description: 'Raison du scan manuel (optionnel)'
-        required: false
-        default: 'Scan manuel'
 
 jobs:
   scan:
     name: Scanner les chaînes IPTV
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # Arrêt forcé après 60 min pour rester dans le quota gratuit
+    timeout-minutes: 60
 
     steps:
-      # 1. Télécharger le code du dépôt
       - name: 📥 Checkout du dépôt
         uses: actions/checkout@v4
 
-      # 2. Configurer Node.js
       - name: ⚙️ Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # 3. Lancer le scan
       - name: 🤖 Lancer le scan
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: node scan.js
-
-      # 4. Résumé final
-      - name: 📊 Résumé
-        if: always()
-        run: echo "✅ Scan terminé — voir les logs ci-dessus pour les détails"
