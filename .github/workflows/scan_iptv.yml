@@ -1,13 +1,22 @@
 # ════════════════════════════════════════════════════════
-#  GitHub Actions — Scan Auto IPTV
-#  50 workers — ~45 min pour 31 000 chaînes (timeout 8s)
+#  GitHub Actions — Scan Auto IPTV + FFmpeg
+#  ✅ FFmpeg installé automatiquement
+#  ✅ 50 workers en parallèle
+#  ✅ channel_priorities jamais modifié
+#  ✅ Ton classement préservé à chaque scan
 # ════════════════════════════════════════════════════════
-name: 🤖 Scan Auto IPTV
+
+name: 🤖 Scan Auto IPTV (FFmpeg)
 
 on:
+  # ── Automatique tous les jours à 6h00 UTC ─────────────
   schedule:
-    - cron: '0 6 * * *'    # Tous les jours à 6h00 UTC
+    - cron: '0 6 * * *'
+    # Autres options :
+    # - cron: '0 */12 * * *'   # toutes les 12h
+    # - cron: '0 6 * * 1'      # tous les lundis
 
+  # ── Manuel depuis GitHub → Actions → Run workflow ─────
   workflow_dispatch:
     inputs:
       reason:
@@ -17,25 +26,45 @@ on:
 
 jobs:
   scan:
-    name: Scanner les chaînes IPTV
+    name: 🎬 Scanner avec FFmpeg
     runs-on: ubuntu-latest
-    timeout-minutes: 200     # ✅ 90 min (était 60 — timeout 8s = ~45 min réel + marge)
+
+    # 50 workers × (6s FFmpeg + 2s) = ~8s/chaîne en pire cas
+    # 31 000 / 50 = 620 × 8s = ~83 min
+    # Marge : 150 min (2h30)
+    timeout-minutes: 150
 
     steps:
-      - name: 📥 Checkout du dépôt
+      # ── 1. Code du dépôt ────────────────────────────────
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: ⚙️ Setup Node.js
+      # ── 2. Node.js ──────────────────────────────────────
+      - name: ⚙️ Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: 🤖 Lancer le scan
+      # ── 3. FFmpeg ───────────────────────────────────────
+      #  ubuntu-latest a déjà ffmpeg, mais on s'assure
+      #  d'avoir la version la plus récente
+      - name: 🎬 Installer FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffprobe -version | head -1
+
+      # ── 4. Lancer le scan ───────────────────────────────
+      - name: 🤖 Lancer le scan FFmpeg
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: node scan.js
+        run: node --experimental-vm-modules scan.js
 
+      # ── 5. Résumé ───────────────────────────────────────
       - name: 📊 Résumé
         if: always()
-        run: echo "✅ Scan terminé — voir les logs ci-dessus"
+        run: |
+          echo "✅ Scan FFmpeg terminé"
+          echo "📋 Voir les logs ci-dessus pour le détail"
+          echo "⭐ channel_priorities non modifié — classement préservé"
