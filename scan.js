@@ -1,10 +1,12 @@
 // ════════════════════════════════════════════════════════
 //  SCAN AUTO — VERSION GITHUB ACTIONS
-//  Le scan fonctionne — seule la publication était cassée :
-//    ❌ PATCH id=eq.1  → échoue si la ligne n'existe pas
-//    ❌ POST  id=1     → bigserial refuse un id manuel
-//    ❌ erreurs jamais affichées → échec silencieux
-//  ✅ Fix : INSERT sans id (bigserial auto) + logs d'erreur
+//  ✅ Fix chaînes beIN Sports / IPTV mal détectées :
+//    - HEAD d'abord (pas de téléchargement du flux)
+//    - Fallback GET avec Range: bytes=0-1023 si HEAD échoue
+//    - Fallback GET classique si Range refusé
+//    - 4 User-Agents réalistes rotatifs (VLC, Kodi, Chrome...)
+//    - Timeout 8s au lieu de 5s
+//    - 401/403/405/500+ gérés correctement
 // ════════════════════════════════════════════════════════
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -26,8 +28,22 @@ const SB_HEADERS_W = {
 };
 
 // ── CONFIG ────────────────────────────────────────────
-const TIMEOUT_MS  = 5_000;  // 5s par chaîne
+const TIMEOUT_MS  = 8_000;  // ✅ 8s (était 5s — trop court pour beIN/OSN)
 const CONCURRENCY = 50;     // 50 workers en parallèle
+
+// ✅ User-Agents réalistes — évite le blocage "IPTVScanner"
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'VLC/3.0.20 LibVLC/3.0.20 (Windows 10; x64)',
+  'Kodi/20.2 (Windows; x86_64) App_Bitness/64 Version/20.2-Git:20230726-ce9ab3be6f',
+  'stagefright/1.2 (Linux;Android 11)',
+  'okhttp/4.11.0',
+  'ExoPlayerLib/2.18.1 (Linux;Android 13) ExoPlayerLib/2.18.1',
+];
+
+function randomUA() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
 
 // ════════════════════════════════════════════════════════
 //  LOG
@@ -85,26 +101,100 @@ async function sbUpsert(table, body) {
 }
 
 // ════════════════════════════════════════════════════════
-//  TEST D'UNE CHAÎNE
+//  TEST D'UNE CHAÎNE — 3 tentatives en cascade
+//
+//  Tentative 1 : HEAD  → rapide, pas de téléchargement
+//  Tentative 2 : GET Range:0-1023 → si HEAD = 405
+//  Tentative 3 : GET classique    → dernier recours
+//
+//  Codes considérés VIVANTS :
+//    < 500         → serveur répond (200, 206, 302, 401, 403, 404...)
+//    401 / 403     → protégé mais le serveur EXISTE et répond
+//    405           → method not allowed → HEAD refusé → on retente en GET
+//
+//  Codes considérés MORTS :
+//    >= 500        → erreur serveur
+//    timeout/abort → flux injoignable
 // ════════════════════════════════════════════════════════
 async function testChannel(ch) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const ua = randomUA();
+
+  // ── Tentative 1 : HEAD ────────────────────────────────
   try {
+    const ctrl1 = new AbortController();
+    const t1 = setTimeout(() => ctrl1.abort(), TIMEOUT_MS);
+
     const res = await fetch(ch.url, {
-      method:   'GET',
-      signal:   controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; IPTVScanner/1.0)',
+      method:   'HEAD',
+      signal:   ctrl1.signal,
+      headers:  {
+        'User-Agent': ua,
         'Accept':     '*/*',
+        'Connection': 'keep-alive',
+        'Icy-MetaData': '1',
       },
       redirect: 'follow',
     });
-    clearTimeout(timer);
-    return res.status < 400 || res.status === 401 || res.status === 403;
-  } catch {
-    clearTimeout(timer);
-    return false;
+    clearTimeout(t1);
+
+    // 405 = server refuses HEAD → fallback GET
+    if (res.status === 405) throw new Error('HEAD_NOT_ALLOWED');
+
+    // Tout ce qui est < 500 = le serveur répond = flux existe
+    return res.status < 500;
+
+  } catch (e1) {
+
+    // ── Tentative 2 : GET avec Range (lit seulement 1 KB) ──
+    if (e1.message !== 'HEAD_NOT_ALLOWED' && e1.name !== 'AbortError') {
+      // Vrai timeout ou erreur réseau → on retente quand même
+    }
+
+    try {
+      const ctrl2 = new AbortController();
+      const t2 = setTimeout(() => ctrl2.abort(), TIMEOUT_MS);
+
+      const res2 = await fetch(ch.url, {
+        method:   'GET',
+        signal:   ctrl2.signal,
+        headers:  {
+          'User-Agent': ua,
+          'Accept':     '*/*',
+          'Range':      'bytes=0-1023',   // lire seulement 1 KB
+          'Connection': 'keep-alive',
+        },
+        redirect: 'follow',
+      });
+      clearTimeout(t2);
+
+      // Annuler le body pour ne pas consommer le flux entier
+      try { await res2.body?.cancel(); } catch {}
+
+      // 206 = Partial Content = parfait, 200 = aussi bon
+      // 416 = Range not satisfiable mais serveur répond
+      if (res2.status < 500) return true;
+
+      // ── Tentative 3 : GET classique sans Range ──────────
+      const ctrl3 = new AbortController();
+      const t3 = setTimeout(() => ctrl3.abort(), TIMEOUT_MS);
+
+      const res3 = await fetch(ch.url, {
+        method:   'GET',
+        signal:   ctrl3.signal,
+        headers:  {
+          'User-Agent': ua,
+          'Accept':     '*/*',
+        },
+        redirect: 'follow',
+      });
+      clearTimeout(t3);
+      try { await res3.body?.cancel(); } catch {}
+
+      return res3.status < 500;
+
+    } catch {
+      return false;
+    }
   }
 }
 
